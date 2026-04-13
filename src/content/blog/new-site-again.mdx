@@ -1,0 +1,33 @@
+---
+title: 'New quarter, new blog'
+description: 'This time, I mean it'
+pubDate: '2026-04-13'
+---
+## Oops, I did it again
+Here I am, in the year 2026, building another blog. This version of my site seeks to remove the one thing we can all agree has ruined the web: ***CSS***.
+
+Like most developers, I've long believed that styles are a crutch used by poor workmen who are afraid to let their HTML stand on its own. The semantic web means we don't need those pesky rules. We can do better!
+
+> "I tried to find a quotation about CSS,
+> because I thought it would help break up
+> this blog post." *-Justin Ebert*
+
+CSS tends to cover up the issues with our webpages we'd rather ignore. It may make things visually but not *structurally* important on a page, giving people using screen readers a different experience from the developer. It may break the machine-readability for web crawlers, demoting the site in search ranking. But none of that really matters.
+
+What matters is that CSS is lazy. How often, knowing you can use styles to differentiate semantically identical elements, have you typed out something like:
+
+```html
+    <div>
+        <div>
+            <div>
+                <div>
+                    <div>
+                        ...
+```
+when you *could* be using the nice, understandable semantic elements that the writers of the HTML spec have given you? Sure, you'll have to read the docs on the [`<hgroup>`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/hgroup) element, which we all know is a slog, but that's what you signed up for when you went to website school. **Deal with it.**
+
+Now, the observant among you might point out that the codeblock above doesn't look like it was styled by our beloved User Agent, and you're right. It's got inline styles that my fancy markdown parsing technology added in. But this blog is about code, so I should be allowed to have a little color in my codeblocks, shouldn't I?
+
+Speaking of that - let me throw out some attribution. This new version of my site was built with [Astro](https://astro.build/), a web framework focused on *content* and *documents*, which I'll remind you is what the web **should** be.
+
+The fancy markdown parser, which adds some functionality useful for code demos, is called [MDX](https://mdxjs.com/). It let me do stuff like <button onClick="window.alert('Thanks for reading!')">this.</button>
