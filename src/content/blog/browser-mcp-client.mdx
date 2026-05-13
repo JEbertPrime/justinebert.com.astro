@@ -5,6 +5,24 @@ pubDate: '2026-04-19'
 ---
 import McpPlayground from '../../components/McpPlayground.astro'
 
-As Google rolls out their [in-browser model](https://developer.chrome.com/docs/ai/built-in)
+As Google rolls out their [in-browser model](https://developer.chrome.com/docs/ai/built-in), it's becoming clear that a web-native system for interacting with MCP servers would be useful. Anthropic provides [tooling for building an MCP client](https://github.com/modelcontextprotocol/typescript-sdk) with TypeScript, but it's designed to run in a server environment. This makes sense since the previous expectation was that a developer would have a server acting as the intermediary between a user and an LLM. But when when the user has the LLM directly in their browser performance is improved by giving the LLM access to an MCP server directly.
 
-<McpPlayground endpoint="https://api.githubcopilot.com/mcp/"  />
+Imagine a typical flow for a chatbot:
+
+ 1. The user interacts with client-side UI
+ 2. The client sends the user data to a server
+ 3. The server sends the user data along with context to a model
+ 4. The host model evaluates the data, calls tools from MCP servers via its MCP clients, and returns a response 
+ 5. The server passes the response along after validating the output
+
+How does our architecture change when the client is moved to the browser? For starters, steps two, three and five can be cut out completely. Without this intermediary, we can follow a simpler flow:
+ 1. The user interacts with client-side UI
+ 2. The user's local LLM evaluates the data (user generated, along with context provided from UI component),  calls tools from *remote* MCP servers over HTTP, and returns a response
+
+Now the only server trip being made is from calls to remote MCP servers, which return simple JSONRPC. The nice thing about this approach is that it enables you to focus on reducing MCP response time as the main performance improvement - you don't need to worry about your TTFB going up by 600ms just because a provider's datacenter is under load. 
+
+Below you can play around with the [browser client I had some chatbots whip up](https://www.npmjs.com/package/simple-browser-mcp-client) based on the [MCP spec](https://modelcontextprotocol.io/specification/2025-11-25) and the official typescript SDK - it aims to provide a the same functionality and call signatures as the official SDK, but in the future I'll probably add a bit more as my needs change. OAuth capabilities are in the works, but largely unusable for now since most MCP server endpoints are locked down by CORS policy.
+
+<McpPlayground endpoint="/api/mcp"  />
+
+Of course, this package is also useful for building out MCP server testing tools - you can easily build a web dashboard to inspect your MCP server and test tool calls. The endpoint used above is a simple MCP server with example tools, but the package should work well with more complex servers.

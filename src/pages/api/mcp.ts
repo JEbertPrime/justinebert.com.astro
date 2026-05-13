@@ -35,13 +35,20 @@ const handler = createMcpHandler(
       async ({ min, max }) => {
         if (min > max) {
           return {
-            content: [{ type: "text", text: `Error: min (${min}) must be ≤ max (${max})` }],
+            content: [
+              {
+                type: "text",
+                text: `Error: min (${min}) must be ≤ max (${max})`,
+              },
+            ],
             isError: true,
           };
         }
         const value = min + Math.floor(Math.random() * (max - min + 1));
         return {
-          content: [{ type: "text", text: `🎯 Picked ${value} (range ${min}–${max})` }],
+          content: [
+            { type: "text", text: `🎯 Picked ${value} (range ${min}–${max})` },
+          ],
         };
       },
     );

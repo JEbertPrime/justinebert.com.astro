@@ -16,6 +16,8 @@
     "@astrojs/rss": "^4.0.18",
     "@astrojs/sitemap": "^3.7.2",
     "astro": "^6.1.5",
-    "sharp": "^0.34.3"
+    "mcp-handler": "^1.1.0",
+    "sharp": "^0.34.3",
+    "simple-browser-mcp-client": "^0.1.1"
   }
 }
