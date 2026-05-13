@@ -15,6 +15,36 @@ const handler = createMcpHandler(
         };
       },
     );
+
+    server.tool(
+      "flip_coin",
+      "Flips a fair coin and returns heads or tails",
+      {},
+      async () => {
+        const result = Math.random() < 0.5 ? "Heads" : "Tails";
+        return {
+          content: [{ type: "text", text: `🪙 ${result}!` }],
+        };
+      },
+    );
+
+    server.tool(
+      "pick_number",
+      "Picks a random integer between min and max (inclusive)",
+      { min: z.number().int(), max: z.number().int() },
+      async ({ min, max }) => {
+        if (min > max) {
+          return {
+            content: [{ type: "text", text: `Error: min (${min}) must be ≤ max (${max})` }],
+            isError: true,
+          };
+        }
+        const value = min + Math.floor(Math.random() * (max - min + 1));
+        return {
+          content: [{ type: "text", text: `🎯 Picked ${value} (range ${min}–${max})` }],
+        };
+      },
+    );
   },
   {},
   { basePath: "/api" },

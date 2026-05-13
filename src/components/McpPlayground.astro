@@ -1,0 +1,771 @@
+---
+interface Props {
+  endpoint?: string;
+  title?: string;
+  description?: string;
+}
+
+const {
+  endpoint = "/api/mcp",
+  title = "MCP Playground",
+  description,
+} = Astro.props;
+---
+
+<section
+  class="mcp-playground"
+  aria-label={`${title} playground`}
+  data-mcp-playground
+  data-endpoint={endpoint}
+>
+  <h2>{title}</h2>
+  <p>
+    {description ?? (
+      <>
+        Connect to any{" "}
+        <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http"
+          >Streamable HTTP MCP server</a
+        >. OAuth 2.1 authorization is handled automatically when the server requires it.
+      </>
+    )}
+  </p>
+
+  <!-- Server URL -->
+  <div class="row">
+    <label for="server-url-input">Server</label>
+    <input
+      data-ref="server-url"
+      id="server-url-input"
+      type="text"
+      value={endpoint}
+      spellcheck="false"
+      placeholder="https://example.com/mcp  or  /api/mcp"
+      autocomplete="off"
+    />
+  </div>
+
+  <!-- Status row -->
+  <div class="row">
+    <span data-ref="badge" class="badge badge-idle" aria-live="polite">Disconnected</span>
+    <button data-ref="btn-connect">Connect</button>
+    <button data-ref="btn-disconnect" disabled>Disconnect</button>
+    <button data-ref="btn-authorize" hidden>Authorize&hellip;</button>
+  </div>
+
+  <!-- Server info -->
+  <div data-ref="server-info" class="server-info" aria-live="polite"></div>
+
+  <!-- Tools -->
+  <div data-ref="tools-section" hidden>
+    <h3>Tools</h3>
+    <ul data-ref="tools-list" class="tools-list"></ul>
+  </div>
+
+  <!-- Call form -->
+  <div data-ref="call-section" hidden>
+    <h3>Call a tool</h3>
+    <div class="row">
+      <label>Tool
+        <select data-ref="tool-name"></select>
+      </label>
+    </div>
+    <div class="row">
+      <label>Arguments (JSON)
+        <input data-ref="tool-args" type="text" value="{}" spellcheck="false" />
+      </label>
+    </div>
+    <button data-ref="btn-call">Call</button>
+  </div>
+
+  <!-- Log -->
+  <h3>Log</h3>
+  <div data-ref="log" class="log" role="log" aria-live="polite" aria-label="Activity log"></div>
+</section>
+
+<script>
+  import { MCPClient, UnauthorizedError } from "simple-browser-mcp-client";
+  import type { OAuthClientProvider } from "simple-browser-mcp-client";
+
+  // ── OAuth session storage provider ─────────────────────────────────────────
+  // Used whenever auth: is passed to MCPClient. Tokens are keyed by endpoint
+  // URL so different servers don't share credentials.
+  function makeOAuthProvider(endpointUrl: string): OAuthClientProvider {
+    // Normalize to absolute URL for a consistent storage key.
+    let abs: string;
+    try { abs = new URL(endpointUrl, window.location.href).href; } catch { abs = endpointUrl; }
+    const k = "mcp_" + abs.replace(/[^a-z0-9]/gi, "_").slice(-48);
+    const redirectUri = window.location.origin + window.location.pathname;
+
+    return {
+      redirectUri,
+      redirectToAuthorization(url) {
+        sessionStorage.setItem("mcp_oauth_pending", JSON.stringify({ endpoint: endpointUrl }));
+        window.location.href = url.toString();
+      },
+      saveTokens:         (t) => sessionStorage.setItem(`${k}_tok`, JSON.stringify(t)),
+      loadTokens:         ()  => { const s = sessionStorage.getItem(`${k}_tok`); return s ? JSON.parse(s) : null; },
+      saveCodeVerifier:   (v) => sessionStorage.setItem(`${k}_ver`, v),
+      loadCodeVerifier:   ()  => sessionStorage.getItem(`${k}_ver`),
+      saveState:          (s) => sessionStorage.setItem(`${k}_st`,  s),
+      loadState:          ()  => sessionStorage.getItem(`${k}_st`),
+      clientMetadata: {
+        client_id:                   `${window.location.origin}/mcp-playground`,
+        client_name:                 "MCP Playground",
+        redirect_uris:               [redirectUri],
+        grant_types:                 ["authorization_code"],
+        response_types:              ["code"],
+        token_endpoint_auth_method:  "none",
+      },
+    };
+  }
+
+  function initPlayground(root: HTMLElement) {
+    const defaultEndpoint = root.dataset.endpoint ?? "/api/mcp";
+
+    // ── DOM refs ──────────────────────────────────────────────────────────
+    const q = <T extends HTMLElement>(ref: string) =>
+      root.querySelector<T>(`[data-ref="${ref}"]`)!;
+
+    const serverUrl     = q<HTMLInputElement>("server-url");
+    const badge         = q("badge");
+    const btnConnect    = q<HTMLButtonElement>("btn-connect");
+    const btnDisconnect = q<HTMLButtonElement>("btn-disconnect");
+    const btnAuthorize  = q<HTMLButtonElement>("btn-authorize");
+    const serverInfo    = q("server-info");
+    const toolsSection  = q("tools-section");
+    const toolsList     = q("tools-list");
+    const callSection   = q("call-section");
+    const toolSelect    = q<HTMLSelectElement>("tool-name");
+    const toolArgs      = q<HTMLInputElement>("tool-args");
+    const btnCall       = q<HTMLButtonElement>("btn-call");
+    const logEl         = q("log");
+
+    // ── Logging ───────────────────────────────────────────────────────────
+    function log(msg: string, kind: "info" | "ok" | "err" = "info") {
+      const line = document.createElement("div");
+      line.className = `log-line log-${kind}`;
+      const ts = new Date().toLocaleTimeString();
+      line.textContent = `[${ts}] ${msg}`;
+      logEl.prepend(line);
+      while (logEl.children.length > 100) logEl.lastChild?.remove();
+    }
+
+    // ── Status ────────────────────────────────────────────────────────────
+    type Status = "idle" | "connecting" | "connected" | "auth-needed" | "authorizing";
+
+    function setStatus(s: Status) {
+      const labels: Record<Status, string> = {
+        "idle":         "Disconnected",
+        "connecting":   "Connecting…",
+        "connected":    "Connected",
+        "auth-needed":  "Auth Required",
+        "authorizing":  "Authorizing…",
+      };
+      badge.className = `badge badge-${s}`;
+      badge.textContent = labels[s];
+
+      const busy = s === "connecting" || s === "authorizing";
+      serverUrl.disabled    = s === "connected" || busy;
+      btnConnect.disabled   = s !== "idle" && s !== "auth-needed";
+      btnDisconnect.disabled = s !== "connected";
+      btnCall.disabled      = s !== "connected";
+      btnAuthorize.hidden   = s !== "auth-needed";
+    }
+
+    // ── Client + auth state ───────────────────────────────────────────────
+    let client: MCPClient | null = null;
+    let pendingWwwAuth: string | undefined;
+
+    function currentEndpoint() {
+      return serverUrl.value.trim() || defaultEndpoint;
+    }
+
+    // ── Connect ───────────────────────────────────────────────────────────
+    async function connect() {
+      const ep = currentEndpoint();
+      setStatus("connecting");
+      log(`Connecting to ${ep}…`);
+
+      client = new MCPClient({
+        endpoint: ep,
+        clientName: "mcp-playground",
+        clientVersion: "1.0.0",
+        auth: makeOAuthProvider(ep),
+        onNotification(method, params) {
+          log(`← ${method} ${params ? JSON.stringify(params) : ""}`, "info");
+        },
+      });
+
+      client.addEventListener("disconnect", () => {
+        setStatus("idle");
+        serverInfo.innerHTML = "";
+        toolsSection.hidden = true;
+        callSection.hidden = true;
+        client = null;
+      });
+
+      try {
+        const info = await client.connect();
+        setStatus("connected");
+        serverInfo.innerHTML =
+          `<strong>${info.title ?? info.name}</strong> v${info.version}` +
+          (info.description ? ` — ${info.description}` : "");
+        log(`Connected to ${info.name} v${info.version}`, "ok");
+        log(`Capabilities: ${JSON.stringify(client.serverCapabilities)}`, "info");
+        await loadTools();
+      } catch (err) {
+        client = null;
+        if (err instanceof UnauthorizedError) {
+          pendingWwwAuth = err.wwwAuthenticate;
+          setStatus("auth-needed");
+          log(`Server requires OAuth authorization. Click "Authorize…" to begin.`, "info");
+        } else {
+          setStatus("idle");
+          log(`Connection failed: ${err}`, "err");
+        }
+      }
+    }
+
+    // ── OAuth authorize ───────────────────────────────────────────────────
+    async function authorize() {
+      const ep = currentEndpoint();
+      setStatus("authorizing");
+      log(`Discovering authorization server for ${ep}…`);
+
+      // Create a temporary client solely for the OAuth discovery + redirect.
+      // The page will navigate away; on return, completeOAuthCallback() runs.
+      const authClient = new MCPClient({
+        endpoint: ep,
+        clientName: "mcp-playground",
+        auth: makeOAuthProvider(ep),
+      });
+
+      try {
+        await authClient.authorize(pendingWwwAuth);
+        // If redirectToAuthorization didn't navigate (unusual), stay in authorizing state.
+      } catch (err) {
+        setStatus("auth-needed");
+        log(`Authorization discovery failed: ${err}`, "err");
+      }
+    }
+
+    // ── OAuth callback completion ─────────────────────────────────────────
+    async function completeOAuthCallback(ep: string, callbackUrl: string) {
+      setStatus("authorizing");
+      log("Completing OAuth authorization…");
+
+      const provider = makeOAuthProvider(ep);
+      const authClient = new MCPClient({ endpoint: ep, clientName: "mcp-playground", auth: provider });
+
+      try {
+        await authClient.finishAuth(callbackUrl);
+        log("Authorization complete. Connecting…", "ok");
+        // Clean `?code=…&state=…` from the address bar before connecting.
+        history.replaceState(null, "", window.location.pathname);
+        serverUrl.value = ep;
+        await connect();
+      } catch (err) {
+        history.replaceState(null, "", window.location.pathname);
+        setStatus("idle");
+        log(`OAuth callback failed: ${err}`, "err");
+      }
+    }
+
+    // ── Load tools ────────────────────────────────────────────────────────
+    async function loadTools() {
+      if (!client) return;
+      try {
+        const { tools } = await client.request<{ tools: Array<{ name: string; description?: string }> }>("tools/list");
+        toolsList.innerHTML = "";
+        toolSelect.innerHTML = "";
+        for (const t of tools) {
+          const li = document.createElement("li");
+          li.textContent = t.description ? `${t.name} — ${t.description}` : t.name;
+          toolsList.appendChild(li);
+          const opt = document.createElement("option");
+          opt.value = t.name;
+          opt.textContent = t.name;
+          toolSelect.appendChild(opt);
+        }
+        toolsSection.hidden = false;
+        callSection.hidden = false;
+        prefillArgs();
+      } catch (err) {
+        log(`tools/list failed: ${err}`, "err");
+      }
+    }
+
+    // ── Prefill args ──────────────────────────────────────────────────────
+    const presets: Record<string, string> = {
+      roll_dice:   '{"sides": 6}',
+      flip_coin:   "{}",
+      pick_number: '{"min": 1, "max": 100}',
+    };
+
+    function prefillArgs() {
+      toolArgs.value = presets[toolSelect.value] ?? "{}";
+    }
+
+    toolSelect.addEventListener("change", prefillArgs);
+
+    // ── Call tool ─────────────────────────────────────────────────────────
+    async function callTool() {
+      if (!client) return;
+      const name = toolSelect.value;
+      let args: unknown;
+      try {
+        args = JSON.parse(toolArgs.value || "{}");
+      } catch {
+        log("Invalid JSON in arguments field.", "err");
+        return;
+      }
+      log(`→ tools/call ${name}(${toolArgs.value})`, "info");
+      try {
+        const result = await client.request("tools/call", { name, arguments: args });
+        log(`← ${JSON.stringify(result)}`, "ok");
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          pendingWwwAuth = err.wwwAuthenticate;
+          setStatus("auth-needed");
+          log(`Session expired — re-authorization required.`, "info");
+        } else {
+          log(`Call failed: ${err}`, "err");
+        }
+      }
+    }
+
+    // ── Disconnect ────────────────────────────────────────────────────────
+    async function disconnect() {
+      await client?.disconnect();
+      setStatus("idle");
+    }
+
+    // ── Wire up ───────────────────────────────────────────────────────────
+    btnConnect.addEventListener("click", connect);
+    btnDisconnect.addEventListener("click", disconnect);
+    btnAuthorize.addEventListener("click", authorize);
+    btnCall.addEventListener("click", callTool);
+
+    // ── OAuth callback detection ──────────────────────────────────────────
+    // If the page URL has `?code=…` and sessionStorage has a pending OAuth
+    // entry (written just before the AS redirect), complete the auth flow.
+    const urlParams = new URLSearchParams(window.location.search);
+    const pendingJson = sessionStorage.getItem("mcp_oauth_pending");
+    if (urlParams.has("code") && pendingJson) {
+      sessionStorage.removeItem("mcp_oauth_pending");
+      try {
+        const pending = JSON.parse(pendingJson) as { endpoint: string };
+        completeOAuthCallback(pending.endpoint, window.location.href).catch(() => {});
+      } catch {
+        history.replaceState(null, "", window.location.pathname);
+        log("Malformed OAuth callback state — please try connecting again.", "err");
+      }
+    }
+  }
+
+  // Bootstrap all instances on the page (supports multiple per page)
+  document.querySelectorAll<HTMLElement>("[data-mcp-playground]").forEach(initPlayground);
+</script>
+
+<style>
+  .mcp-playground {
+    margin-top: 2rem;
+    font-family: inherit;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: bold;
+  }
+
+  input[type="text"],
+  select {
+    font-family: monospace;
+    font-size: 0.9rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    border-radius: 2px;
+    flex: 1;
+    min-width: 12rem;
+  }
+
+  input[data-ref="server-url"] {
+    min-width: 20rem;
+  }
+
+  button {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 0.9rem;
+  }
+
+  button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  button:not(:disabled):hover {
+    background: currentColor;
+    color: canvas;
+  }
+
+  .badge {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    font-weight: bold;
+    white-space: nowrap;
+  }
+
+  .badge-idle        { opacity: 0.45; }
+  .badge-connecting  { color: darkorange; }
+  .badge-connected   { color: green; }
+  .badge-auth-needed { color: darkorange; }
+  .badge-authorizing { color: steelblue; }
+
+  .server-info {
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+    min-height: 1.2em;
+  }
+
+  .tools-list {
+    margin: 0.5rem 0 1rem;
+    padding-left: 1.25rem;
+    font-size: 0.9rem;
+  }
+
+  .log {
+    font-family: monospace;
+    font-size: 0.8rem;
+    border: 1px solid currentColor;
+    padding: 0.5rem;
+    height: 14rem;
+    overflow-y: auto;
+    border-radius: 2px;
+    opacity: 0.85;
+  }
+
+  .log-line { margin: 0.1rem 0; }
+  .log-ok   { color: green; }
+  .log-err  { color: red; }
+</style>
+
+
+<section
+  class="mcp-playground"
+  aria-label={`${title} playground`}
+  data-mcp-playground
+  data-endpoint={endpoint}
+>
+  <h2>{title}</h2>
+  <p>
+    {description ?? (
+      <>
+        Connects directly to <code>{endpoint}</code> using{" "}
+        <a href="https://www.npmjs.com/package/simple-browser-mcp-client"
+          >simple-browser-mcp-client</a
+        >.
+      </>
+    )}
+  </p>
+
+  <!-- Status row -->
+  <div class="row">
+    <span data-ref="badge" class="badge badge-idle" aria-live="polite">Disconnected</span>
+    <button data-ref="btn-connect">Connect</button>
+    <button data-ref="btn-disconnect" disabled>Disconnect</button>
+  </div>
+
+  <!-- Server info -->
+  <div data-ref="server-info" class="server-info" aria-live="polite"></div>
+
+  <!-- Tools -->
+  <div data-ref="tools-section" hidden>
+    <h3>Tools</h3>
+    <ul data-ref="tools-list" class="tools-list"></ul>
+  </div>
+
+  <!-- Call form -->
+  <div data-ref="call-section" hidden>
+    <h3>Call a tool</h3>
+    <div class="row">
+      <label>Tool
+        <select data-ref="tool-name"></select>
+      </label>
+    </div>
+    <div class="row">
+      <label>Arguments (JSON)
+        <input data-ref="tool-args" type="text" value="{}" spellcheck="false" />
+      </label>
+    </div>
+    <button data-ref="btn-call">Call</button>
+  </div>
+
+  <!-- Log -->
+  <h3>Log</h3>
+  <div data-ref="log" class="log" role="log" aria-live="polite" aria-label="Activity log"></div>
+</section>
+
+<script>
+  import { MCPClient } from "simple-browser-mcp-client";
+
+  function initPlayground(root: HTMLElement) {
+    const endpoint = root.dataset.endpoint ?? "/api/mcp";
+
+    // ── DOM refs (scoped to this instance) ────────────────────────────────
+    const q = <T extends HTMLElement>(ref: string) =>
+      root.querySelector<T>(`[data-ref="${ref}"]`)!;
+
+    const badge         = q("badge");
+    const btnConnect    = q<HTMLButtonElement>("btn-connect");
+    const btnDisconnect = q<HTMLButtonElement>("btn-disconnect");
+    const serverInfo    = q("server-info");
+    const toolsSection  = q("tools-section");
+    const toolsList     = q("tools-list");
+    const callSection   = q("call-section");
+    const toolSelect    = q<HTMLSelectElement>("tool-name");
+    const toolArgs      = q<HTMLInputElement>("tool-args");
+    const btnCall       = q<HTMLButtonElement>("btn-call");
+    const logEl         = q("log");
+
+    // ── Logging ──────────────────────────────────────────────────────────
+    function log(msg: string, kind: "info" | "ok" | "err" = "info") {
+      const line = document.createElement("div");
+      line.className = `log-line log-${kind}`;
+      const ts = new Date().toLocaleTimeString();
+      line.textContent = `[${ts}] ${msg}`;
+      logEl.prepend(line);
+      while (logEl.children.length > 100) logEl.lastChild?.remove();
+    }
+
+    // ── Status ────────────────────────────────────────────────────────────
+    function setStatus(s: "idle" | "connecting" | "connected") {
+      badge.className = `badge badge-${s}`;
+      badge.textContent = { idle: "Disconnected", connecting: "Connecting…", connected: "Connected" }[s];
+      btnConnect.disabled = s !== "idle";
+      btnDisconnect.disabled = s !== "connected";
+      btnCall.disabled = s !== "connected";
+    }
+
+    // ── Client state ──────────────────────────────────────────────────────
+    let client: MCPClient | null = null;
+
+    // ── Connect ───────────────────────────────────────────────────────────
+    async function connect() {
+      setStatus("connecting");
+      client = new MCPClient({
+        endpoint,
+        clientName: "mcp-playground",
+        clientVersion: "1.0.0",
+        onNotification(method, params) {
+          log(`← ${method} ${params ? JSON.stringify(params) : ""}`, "info");
+        },
+      });
+
+      client.addEventListener("disconnect", () => {
+        setStatus("idle");
+        serverInfo.innerHTML = "";
+        toolsSection.hidden = true;
+        callSection.hidden = true;
+        client = null;
+      });
+
+      try {
+        const info = await client.connect();
+        setStatus("connected");
+        serverInfo.innerHTML = `<strong>${info.title ?? info.name}</strong> v${info.version}${info.description ? ` — ${info.description}` : ""}`;
+        log(`Connected to ${info.name} v${info.version}`, "ok");
+        log(`Capabilities: ${JSON.stringify(client.serverCapabilities)}`, "info");
+        await loadTools();
+      } catch (err) {
+        setStatus("idle");
+        log(`Connection failed: ${err}`, "err");
+        client = null;
+      }
+    }
+
+    // ── Load tools ────────────────────────────────────────────────────────
+    async function loadTools() {
+      if (!client) return;
+      try {
+        const { tools } = await client.request<{ tools: Array<{ name: string; description?: string }> }>("tools/list");
+        toolsList.innerHTML = "";
+        toolSelect.innerHTML = "";
+        for (const t of tools) {
+          const li = document.createElement("li");
+          li.textContent = t.description ? `${t.name} — ${t.description}` : t.name;
+          toolsList.appendChild(li);
+          const opt = document.createElement("option");
+          opt.value = t.name;
+          opt.textContent = t.name;
+          toolSelect.appendChild(opt);
+        }
+        toolsSection.hidden = false;
+        callSection.hidden = false;
+        prefillArgs();
+      } catch (err) {
+        log(`tools/list failed: ${err}`, "err");
+      }
+    }
+
+    // ── Prefill args ──────────────────────────────────────────────────────
+    const presets: Record<string, string> = {
+      roll_dice: '{"sides": 6}',
+      flip_coin: "{}",
+      pick_number: '{"min": 1, "max": 100}',
+    };
+
+    function prefillArgs() {
+      toolArgs.value = presets[toolSelect.value] ?? "{}";
+    }
+
+    toolSelect.addEventListener("change", prefillArgs);
+
+    // ── Call tool ─────────────────────────────────────────────────────────
+    async function callTool() {
+      if (!client) return;
+      const name = toolSelect.value;
+      let args: unknown;
+      try {
+        args = JSON.parse(toolArgs.value || "{}");
+      } catch {
+        log("Invalid JSON in arguments field.", "err");
+        return;
+      }
+      log(`→ tools/call ${name}(${toolArgs.value})`, "info");
+      try {
+        const result = await client.request("tools/call", { name, arguments: args });
+        log(`← ${JSON.stringify(result)}`, "ok");
+      } catch (err) {
+        log(`Call failed: ${err}`, "err");
+      }
+    }
+
+    // ── Disconnect ────────────────────────────────────────────────────────
+    async function disconnect() {
+      await client?.disconnect();
+      setStatus("idle");
+    }
+
+    // ── Wire up ───────────────────────────────────────────────────────────
+    btnConnect.addEventListener("click", connect);
+    btnDisconnect.addEventListener("click", disconnect);
+    btnCall.addEventListener("click", callTool);
+  }
+
+  // Bootstrap all instances on the page (supports multiple per page)
+  document.querySelectorAll<HTMLElement>("[data-mcp-playground]").forEach(initPlayground);
+</script>
+
+<style>
+  .mcp-playground {
+    margin-top: 2rem;
+    font-family: inherit;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: bold;
+  }
+
+  input[type="text"],
+  select {
+    font-family: monospace;
+    font-size: 0.9rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    border-radius: 2px;
+    flex: 1;
+    min-width: 12rem;
+  }
+
+  button {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 0.9rem;
+  }
+
+  button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  button:not(:disabled):hover {
+    background: currentColor;
+    color: canvas;
+  }
+
+  .badge {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    font-weight: bold;
+    white-space: nowrap;
+  }
+
+  .badge-idle { opacity: 0.45; }
+  .badge-connecting { color: darkorange; }
+  .badge-connected { color: green; }
+
+  .server-info {
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+    min-height: 1.2em;
+  }
+
+  .tools-list {
+    margin: 0.5rem 0 1rem;
+    padding-left: 1.25rem;
+    font-size: 0.9rem;
+  }
+
+  .log {
+    font-family: monospace;
+    font-size: 0.8rem;
+    border: 1px solid currentColor;
+    padding: 0.5rem;
+    height: 14rem;
+    overflow-y: auto;
+    border-radius: 2px;
+    opacity: 0.85;
+  }
+
+  .log-line { margin: 0.1rem 0; }
+  .log-ok  { color: green; }
+  .log-err { color: red; }
+</style>
