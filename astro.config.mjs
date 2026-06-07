@@ -11,4 +11,12 @@ export default defineConfig({
   site: "https://justinebert.com",
   integrations: [mdx(), sitemap()],
   adapter: vercel(),
+  vite: {
+    resolve: {
+      alias: {
+        sharp$: false,
+        "onnxruntime-node$": false,
+      },
+    },
+  },
 });

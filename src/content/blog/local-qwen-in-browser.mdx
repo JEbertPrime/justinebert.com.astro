@@ -1,0 +1,32 @@
+---
+title: "Transformers.js + AI SDK Browser Chat POC"
+description: "An Astro implementation of the official Next.js AI SDK tutorial flow for in-browser inference"
+pubDate: "2026-06-07"
+---
+import LocalQwenBrowserTest from "../../components/LocalQwenBrowserTest.astro";
+
+I replaced the local-file-serving prototype with the official Transformers.js tutorial approach for AI SDK browser chat.
+
+This post includes a small test harness that does three things:
+
+1. Loads an ONNX model from the Hub with `@browser-ai/transformers-js`.
+2. Runs inference in a Web Worker to keep the UI responsive.
+3. Uses `ai` `streamText()` plus tools for a browser-side chat loop.
+
+The browser test below follows the same architecture as the Next.js tutorial, adapted for Astro.
+
+<LocalQwenBrowserTest />
+
+## How it works
+
+The component creates a model with `transformersJS("onnx-community/Qwen3-0.6B-ONNX", ...)`, checks availability, downloads on first use with progress updates, and then runs `streamText()` with a small toolset.
+
+This mirrors the tutorial's model/tool/chat loop design without requiring Next.js.
+
+## Local setup
+
+Run:
+
+`npm run dev`
+
+Then open this post and send a prompt. The model downloads once and is cached by the browser.

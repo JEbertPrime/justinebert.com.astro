@@ -1,0 +1,214 @@
+<section class="qwen-test">
+  <h2>Try the Transformers.js + AI SDK Browser Example</h2>
+  <p>
+    This follows the tutorial pattern using <code>@browser-ai/transformers-js</code>
+    and <code>ai</code> for in-browser chat + tool calling.
+  </p>
+
+  <label for="qwen-prompt">Prompt</label>
+  <textarea id="qwen-prompt" rows="4">What time is it right now? Then generate a random number between 1 and 10.</textarea>
+
+  <div class="actions">
+    <button id="qwen-run" type="button">Send</button>
+  </div>
+
+  <p id="qwen-status" class="status" aria-live="polite">Idle.</p>
+
+  <label for="qwen-output">Conversation</label>
+  <pre id="qwen-output">No messages yet.</pre>
+</section>
+
+<script type="module">
+  import { streamText, stepCountIs, tool } from "ai";
+  import { transformersJS } from "@browser-ai/transformers-js";
+  import z from "zod";
+
+  const promptInput = document.getElementById("qwen-prompt");
+  const runButton = document.getElementById("qwen-run");
+  const statusEl = document.getElementById("qwen-status");
+  const outputEl = document.getElementById("qwen-output");
+
+  const messages = [];
+  let inferenceWorker;
+  let modelPromise;
+
+  function getInferenceWorker() {
+    if (!inferenceWorker) {
+      inferenceWorker = new Worker(
+        new URL("./transformers.worker.ts", import.meta.url),
+        { type: "module", name: "transformers-inference-worker" },
+      );
+    }
+
+    return inferenceWorker;
+  }
+
+  function renderConversation() {
+    if (messages.length === 0) {
+      outputEl.textContent = "No messages yet.";
+      return;
+    }
+
+    outputEl.textContent = messages
+      .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
+      .join("\n\n");
+  }
+
+  function createTools() {
+    return {
+      getCurrentTime: tool({
+        description: "Get the current date and time.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const now = new Date();
+          return {
+            timestamp: now.toISOString(),
+            time: now.toLocaleTimeString(),
+            date: now.toLocaleDateString(),
+          };
+        },
+      }),
+      randomNumber: tool({
+        description: "Generate a random integer between min and max (inclusive).",
+        inputSchema: z.object({
+          min: z.number(),
+          max: z.number(),
+        }),
+        execute: async ({ min, max }) => {
+          const lower = Math.ceil(min);
+          const upper = Math.floor(max);
+          return Math.floor(Math.random() * (upper - lower + 1)) + lower;
+        },
+      }),
+    };
+  }
+
+  async function getModel() {
+    if (!modelPromise) {
+      modelPromise = (async () => {
+        const model = transformersJS("onnx-community/Qwen3-0.6B-ONNX", {
+          device: "webgpu",
+          dtype: "q4f16",
+          worker: getInferenceWorker(),
+        });
+
+        const availability = await model.availability();
+        if (availability !== "available") {
+          statusEl.textContent = "Downloading model...";
+          await model.createSessionWithProgress((progress) => {
+            const percent = Math.round(progress * 100);
+            statusEl.textContent = `Downloading model: ${percent}%`;
+          });
+        }
+
+        return model;
+      })();
+    }
+
+    return modelPromise;
+  }
+
+  window.addEventListener("beforeunload", () => {
+    if (inferenceWorker) {
+      inferenceWorker.terminate();
+      inferenceWorker = undefined;
+    }
+  });
+
+  runButton?.addEventListener("click", async () => {
+    const prompt = promptInput?.value?.trim() ?? "";
+    if (!prompt) {
+      statusEl.textContent = "Add a prompt first.";
+      return;
+    }
+
+    runButton.disabled = true;
+    statusEl.textContent = "Thinking...";
+
+    messages.push({ role: "user", content: prompt });
+    renderConversation();
+
+    try {
+      const model = await getModel();
+
+      const result = streamText({
+        model,
+        tools: createTools(),
+        stopWhen: stepCountIs(5),
+        messages,
+      });
+
+      let assistantText = "";
+      messages.push({ role: "assistant", content: "" });
+
+      for await (const chunk of result.textStream) {
+        assistantText += chunk;
+        messages[messages.length - 1].content = assistantText;
+        renderConversation();
+      }
+
+      statusEl.textContent = "Done.";
+    } catch (error) {
+      console.error(error);
+      statusEl.textContent = "Failed. Check devtools for details.";
+    } finally {
+      runButton.disabled = false;
+    }
+  });
+</script>
+
+<style>
+  .qwen-test {
+    margin: 2rem 0;
+    padding: 1rem;
+    border: 1px solid #d0d7de;
+    border-radius: 0.75rem;
+    background: #fafbfc;
+  }
+
+  .qwen-test label {
+    display: block;
+    font-weight: 600;
+    margin: 0.75rem 0 0.4rem;
+  }
+
+  .qwen-test textarea {
+    width: 100%;
+    font: inherit;
+    padding: 0.6rem;
+  }
+
+  .actions {
+    margin-top: 0.75rem;
+  }
+
+  .qwen-test button {
+    background: #111827;
+    color: white;
+    border: 0;
+    border-radius: 0.5rem;
+    padding: 0.6rem 1rem;
+    cursor: pointer;
+  }
+
+  .qwen-test button:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .status {
+    margin-top: 0.75rem;
+    color: #1f2937;
+  }
+
+  .qwen-test pre {
+    margin-top: 0.4rem;
+    padding: 0.75rem;
+    min-height: 8rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    border-radius: 0.5rem;
+    background: #0f172a;
+    color: #f8fafc;
+  }
+</style>

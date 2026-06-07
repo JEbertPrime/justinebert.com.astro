@@ -12,13 +12,18 @@
     "astro": "astro"
   },
   "dependencies": {
+    "@ai-sdk/react": "^3.0.199",
     "@astrojs/mdx": "^5.0.3",
     "@astrojs/rss": "^4.0.18",
     "@astrojs/sitemap": "^3.7.2",
     "@astrojs/vercel": "^10.0.6",
+    "@browser-ai/transformers-js": "^2.2.2",
+    "@huggingface/transformers": "^4.2.0",
+    "ai": "^6.0.197",
     "astro": "^6.1.5",
     "mcp-handler": "^1.1.0",
     "sharp": "^0.34.3",
-    "simple-browser-mcp-client": "^0.2.0"
+    "simple-browser-mcp-client": "^0.2.0",
+    "zod": "^4.4.3"
   }
 }
