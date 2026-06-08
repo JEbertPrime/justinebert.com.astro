@@ -12,11 +12,9 @@ export default defineConfig({
   integrations: [mdx(), sitemap()],
   adapter: vercel(),
   vite: {
-    resolve: {
-      alias: {
-        sharp$: false,
-        "onnxruntime-node$": false,
-      },
+    optimizeDeps: {
+      exclude: ["needle-rs"],
     },
+    
   },
 });

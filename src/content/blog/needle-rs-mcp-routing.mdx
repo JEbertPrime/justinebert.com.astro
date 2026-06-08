@@ -1,0 +1,32 @@
+---
+title: "needle-rs + Browser MCP Client"
+description: "A basic in-browser tool-routing flow using needle-rs and simple-browser-mcp-client"
+pubDate: "2026-06-08"
+---
+
+import NeedleMcpRouter from "../../components/NeedleMcpRouter.astro";
+
+Last time I wrote to you all, I showed a simple implementation of the MCP spec in javascript. At the time I didn't have a great way to actually use it - most tool calling LLMs that had been ported to the browser were pretty large. Smaller machines couldn't run them at all, and large machines couldn't run them fast.
+
+Luckily people are doing fun things every day, like the folks at Cactus Compute, who have created [Needle](https://github.com/cactus-compute/needle), a 26M parameter model that calls tools and does nothing else. It's perfect for what I need, and because I didn't find it until it had already been out for a week, somebody else compiled a [WASM runtime](https://github.com/Geekgineer/needle-rs) for it so I can run it in the browser. 
+
+It's pretty simple to connect this with the MCP client I wrote, and the results are really fun - below, you can try out connecting to an MCP server, loading the model and tools, and then querying the model. Once again, I'll link to [this list of public MCP servers](https://mcpservers.org/) you can use for testing. Code is on github if you want to reproduce! 
+
+
+## Basic Implementation
+
+The component below wires `needle-rs` into the MCP flow:
+
+- `MCPClient.connect()` to establish a session.
+- `listTools()` to get server tools.
+- `NeedleWasm.load()` with safetensor weights + `vocab.txt`.
+- `engine.run(query, toolsJson)` to produce structured tool-call JSON.
+- `client.callTool(...)` to execute the selected tool.
+
+<NeedleMcpRouter endpoint="/api/mcp" />
+
+## Notes
+
+- The default model asset URLs in the demo point to the public Hugging Face files from the `needle-rs` README.
+- For production usage, host the weight files behind your own caching strategy.
+- This pattern works well when you want deterministic local routing and remote tool execution over MCP.

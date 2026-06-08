@@ -1,0 +1,521 @@
+---
+interface Props {
+  endpoint?: string;
+  title?: string;
+  description?: string;
+  weightsUrl?: string;
+  vocabUrl?: string;
+}
+
+const {
+  endpoint = "/api/mcp",
+  title = "Needle + MCP Router",
+  description,
+  weightsUrl =
+    "https://huggingface.co/Abdalrahman/needle-rs-safetensors/resolve/main/needle.safetensors",
+  vocabUrl =
+    "https://huggingface.co/Abdalrahman/needle-rs-safetensors/resolve/main/vocab.txt",
+} = Astro.props;
+---
+
+<section
+  class="needle-router"
+  aria-label={`${title} demo`}
+  data-needle-router
+  data-endpoint={endpoint}
+  data-weights-url={weightsUrl}
+  data-vocab-url={vocabUrl}
+>
+  <h2>{title}</h2>
+  {description && <p>{description}</p>}
+
+  <div class="row">
+    <label class="label-inline">
+      MCP endpoint
+      <input data-ref="endpoint" type="url" value={endpoint} spellcheck="false" />
+    </label>
+    <button data-ref="connect">Connect</button>
+    <button data-ref="disconnect" disabled>Disconnect</button>
+    <span data-ref="status" class="badge badge-idle">Disconnected</span>
+  </div>
+
+  <div class="row">
+    <label class="label-inline">
+      Weights URL
+      <input data-ref="weights" type="url" value={weightsUrl} spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="row">
+    <label class="label-inline">
+      Vocab URL
+      <input data-ref="vocab" type="url" value={vocabUrl} spellcheck="false" />
+    </label>
+    <button data-ref="load-model" disabled>Load needle-rs</button>
+  </div>
+  <h3>Tool schemas</h3>
+  <div data-ref="tool-schemas" class="tool-schemas"></div>
+
+  <div class="row">
+    <label class="label-inline">
+      User request
+      <input
+        data-ref="query"
+        type="text"
+        value="Roll a 20 sided die"
+        spellcheck="false"
+      />
+    </label>
+    <button data-ref="run" disabled>Route and call tool</button>
+  </div>
+
+  <h3>Router output</h3>
+  <pre data-ref="router-output" class="output"></pre>
+
+  <h3>Execution output</h3>
+  <pre data-ref="tool-output" class="output"></pre>
+
+
+  <h3>Log</h3>
+  <div data-ref="log" class="log" role="log" aria-live="polite"></div>
+</section>
+
+<script>
+  import initNeedle, { NeedleWasm } from "needle-rs";
+  import { MCPClient, type Tool } from "simple-browser-mcp-client";
+
+  interface NeedleCall {
+    name: string;
+    arguments?: Record<string, unknown>;
+  }
+
+  function initRouter(root: HTMLElement) {
+    const q = <T extends HTMLElement>(ref: string) =>
+      root.querySelector<T>(`[data-ref="${ref}"]`)!;
+
+    const endpointInput = q<HTMLInputElement>("endpoint");
+    const weightsInput = q<HTMLInputElement>("weights");
+    const vocabInput = q<HTMLInputElement>("vocab");
+    const queryInput = q<HTMLInputElement>("query");
+    const btnConnect = q<HTMLButtonElement>("connect");
+    const btnDisconnect = q<HTMLButtonElement>("disconnect");
+    const btnLoadModel = q<HTMLButtonElement>("load-model");
+    const btnRun = q<HTMLButtonElement>("run");
+    const status = q("status");
+    const logEl = q("log");
+    const routerOutput = q("router-output");
+    const toolOutput = q("tool-output");
+    const toolSchemasEl = q("tool-schemas");
+
+    let client: MCPClient | null = null;
+    let tools: Tool[] = [];
+    let engine: NeedleWasm | null = null;
+    const modelCacheName = "needle-rs-assets-v1";
+
+    function log(msg: string, kind: "info" | "ok" | "err" = "info") {
+      const row = document.createElement("div");
+      row.className = `log-line log-${kind}`;
+      row.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.prepend(row);
+      while (logEl.children.length > 80) logEl.lastChild?.remove();
+    }
+
+    function setConnectionState(state: "idle" | "connecting" | "connected") {
+      status.className = `badge badge-${state}`;
+      status.textContent =
+        state === "connected"
+          ? "Connected"
+          : state === "connecting"
+            ? "Connecting..."
+            : "Disconnected";
+      btnConnect.disabled = state !== "idle";
+      btnDisconnect.disabled = state !== "connected";
+      endpointInput.disabled = state !== "idle";
+      btnLoadModel.disabled = state !== "connected";
+      btnRun.disabled = !(state === "connected" && !!engine && tools.length > 0);
+    }
+
+    function renderToolSchemas(inputTools: Tool[]) {
+      toolSchemasEl.innerHTML = "";
+      if (inputTools.length === 0) {
+        toolSchemasEl.textContent = "No tools available.";
+        return;
+      }
+
+      for (const tool of inputTools) {
+        const schema =
+          tool.inputSchema && typeof tool.inputSchema === "object"
+            ? tool.inputSchema
+            : { type: "object", properties: {} };
+
+        const card = document.createElement("details");
+        card.className = "schema-card";
+
+        const summary = document.createElement("summary");
+        summary.textContent = tool.name;
+        card.appendChild(summary);
+
+        const pre = document.createElement("pre");
+        pre.className = "output";
+        pre.textContent = JSON.stringify(schema, null, 2);
+        card.appendChild(pre);
+
+        toolSchemasEl.appendChild(card);
+      }
+    }
+
+    async function fetchWithCache(url: string): Promise<Response> {
+      if (typeof caches === "undefined") {
+        return fetch(url);
+      }
+
+      const request = new Request(url, { method: "GET" });
+      const cache = await caches.open(modelCacheName);
+      const cachedResponse = await cache.match(request);
+      if (cachedResponse) {
+        log(`Cache hit: ${url}`, "info");
+        return cachedResponse;
+      }
+
+      log(`Cache miss: ${url}`, "info");
+      const response = await fetch(request);
+      if (response.ok) {
+        await cache.put(request, response.clone());
+      }
+      return response;
+    }
+
+    async function connect() {
+      setConnectionState("connecting");
+      const endpoint = endpointInput.value.trim() || root.dataset.endpoint || "/api/mcp";
+
+      client = new MCPClient({
+        endpoint,
+        clientName: "needle-router",
+        clientVersion: "1.0.0",
+      });
+
+      client.addEventListener("disconnect", () => {
+        tools = [];
+        setConnectionState("idle");
+        btnRun.disabled = true;
+        renderToolSchemas([]);
+        log("Disconnected from MCP server", "info");
+      });
+
+      try {
+        const info = await client.connect();
+
+        const allTools: Tool[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await client.listTools(cursor ? { cursor } : undefined);
+          allTools.push(...page.tools);
+          cursor = page.nextCursor;
+        } while (cursor);
+
+        tools = allTools;
+        renderToolSchemas(tools);
+
+        log(`Connected to ${info.name} (${tools.length} tools)`, "ok");
+        setConnectionState("connected");
+      } catch (error) {
+        client = null;
+        tools = [];
+        renderToolSchemas([]);
+        setConnectionState("idle");
+        log(`Connect failed: ${String(error)}`, "err");
+      }
+    }
+
+    async function disconnect() {
+      await client?.disconnect();
+      client = null;
+      tools = [];
+      renderToolSchemas([]);
+      setConnectionState("idle");
+    }
+
+    async function loadNeedleModel() {
+      try {
+        const weightsUrl = weightsInput.value.trim();
+        const vocabUrl = vocabInput.value.trim();
+        if (!weightsUrl || !vocabUrl) {
+          log("Weights URL and vocab URL are required", "err");
+          return;
+        }
+
+        btnLoadModel.disabled = true;
+        log("Initializing needle-rs WASM runtime...", "info");
+        await initNeedle();
+
+        log("Downloading model files...", "info");
+        const [weightsRes, vocabRes] = await Promise.all([
+          fetchWithCache(weightsUrl),
+          fetchWithCache(vocabUrl),
+        ]);
+
+        if (!weightsRes.ok) {
+          throw new Error(`Weights download failed: ${weightsRes.status}`);
+        }
+        if (!vocabRes.ok) {
+          throw new Error(`Vocab download failed: ${vocabRes.status}`);
+        }
+
+        const [weightsBuffer, vocabText] = await Promise.all([
+          weightsRes.arrayBuffer(),
+          vocabRes.text(),
+        ]);
+
+        engine = NeedleWasm.load(new Uint8Array(weightsBuffer), vocabText) ?? null;
+        if (!engine) throw new Error("NeedleWasm.load() returned null");
+
+        log("needle-rs loaded and ready", "ok");
+        btnRun.disabled = !(!!client && tools.length > 0);
+      } catch (error) {
+        engine = null;
+        btnRun.disabled = true;
+        log(`Model load failed: ${String(error)}`, "err");
+      } finally {
+        if (client) btnLoadModel.disabled = false;
+      }
+    }
+
+    function toNeedleTools(inputTools: Tool[]): Array<Record<string, unknown>> {
+      return inputTools.map((tool) => {
+        const schema =
+          tool.inputSchema && typeof tool.inputSchema === "object"
+            ? tool.inputSchema
+            : { type: "object", properties: {} };
+
+        return {
+          name: tool.name,
+          description: tool.description ?? "",
+          parameters: schema,
+        };
+      });
+    }
+
+    function parseNeedleOutput(raw: string): NeedleCall[] {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const calls = parsed
+          .filter(
+            (item): item is NeedleCall =>
+              !!item &&
+              typeof item === "object" &&
+              typeof (item as { name?: unknown }).name === "string",
+          )
+          .map((item) => ({
+            name: item.name,
+            arguments: item.arguments ?? {},
+          }));
+
+        if (calls.length === 0) {
+          throw new Error("Needle output array did not include any valid tool calls");
+        }
+
+        return calls;
+      }
+      if (!parsed || typeof parsed.name !== "string") {
+        throw new Error("Needle output did not contain a tool name");
+      }
+      return [{ name: parsed.name, arguments: parsed.arguments ?? {} }];
+    }
+
+    async function routeAndCall() {
+      if (!client || !engine) {
+        log("Connect to MCP and load needle-rs first", "err");
+        return;
+      }
+      if (tools.length === 0) {
+        log("No tools available on MCP server", "err");
+        return;
+      }
+
+      const query = queryInput.value.trim();
+      if (!query) {
+        log("Enter a user request first", "err");
+        return;
+      }
+
+      try {
+        const needleTools = toNeedleTools(tools);
+        const raw = engine.run(query, JSON.stringify(needleTools));
+        routerOutput.textContent = raw;
+
+        const calls = parseNeedleOutput(raw);
+        log(`Needle selected ${calls.length} call(s)`, "ok");
+
+        const results: Array<{
+          index: number;
+          name: string;
+          arguments: Record<string, unknown>;
+          result: unknown;
+          isError: boolean;
+        }> = [];
+
+        for (const [index, call] of calls.entries()) {
+          log(`Calling [${index + 1}/${calls.length}] ${call.name}`, "info");
+
+          const result = await client.callTool({
+            name: call.name,
+            arguments: (call.arguments ?? {}) as Record<string, unknown>,
+          });
+
+          results.push({
+            index: index + 1,
+            name: call.name,
+            arguments: (call.arguments ?? {}) as Record<string, unknown>,
+            result,
+            isError: !!result.isError,
+          });
+
+          if (result.isError) {
+            log(`Tool call returned error for ${call.name}`, "err");
+          } else {
+            log(`Tool call succeeded for ${call.name}`, "ok");
+          }
+        }
+
+        toolOutput.textContent = JSON.stringify(results, null, 2);
+      } catch (error) {
+        log(`Route/call failed: ${String(error)}`, "err");
+      }
+    }
+
+    btnConnect.addEventListener("click", connect);
+    btnDisconnect.addEventListener("click", disconnect);
+    btnLoadModel.addEventListener("click", loadNeedleModel);
+    btnRun.addEventListener("click", routeAndCall);
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-needle-router]").forEach(initRouter);
+</script>
+
+<style>
+  .needle-router {
+    margin-top: 2rem;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .label-inline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: bold;
+    flex: 1;
+  }
+
+  input[type="text"],
+  input[type="url"] {
+    font-family: monospace;
+    font-size: 0.9rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    border-radius: 2px;
+    flex: 1;
+    min-width: 12rem;
+  }
+
+  button {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+
+  button:disabled,
+  input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .badge {
+    font-size: 0.75rem;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0.1rem 0.55rem;
+  }
+
+  .badge-idle {
+    opacity: 0.75;
+  }
+
+  .badge-connecting {
+    font-style: italic;
+  }
+
+  .badge-connected {
+    font-weight: 600;
+  }
+
+  .output {
+    border: 1px dashed currentColor;
+    border-radius: 4px;
+    min-height: 3.2rem;
+    padding: 0.6rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .log {
+    border: 1px dashed currentColor;
+    border-radius: 4px;
+    min-height: 6rem;
+    max-height: 14rem;
+    overflow: auto;
+    padding: 0.6rem;
+    font-family: monospace;
+    font-size: 0.85rem;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 0.35rem;
+  }
+
+  .log-ok {
+    opacity: 1;
+  }
+
+  .log-info {
+    opacity: 0.88;
+  }
+
+  .log-err {
+    font-weight: 600;
+  }
+
+  .tool-schemas {
+    margin-bottom: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .schema-card {
+    border: 1px dashed currentColor;
+    border-radius: 4px;
+    padding: 0.25rem 0.6rem;
+  }
+
+  .schema-card summary {
+    cursor: pointer;
+    font-weight: 600;
+    user-select: none;
+    margin: 0.3rem 0;
+  }
+</style>
