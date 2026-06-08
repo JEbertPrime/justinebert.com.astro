@@ -12,6 +12,11 @@ Luckily people are doing fun things every day, like the folks at Cactus Compute,
 
 It's pretty simple to connect this with the MCP client I wrote, and the results are really fun - below, you can try out connecting to an MCP server, loading the model and tools, and then querying the model. Once again, I'll link to [this list of public MCP servers](https://mcpservers.org/) you can use for testing. Code is on github if you want to reproduce! 
 
+## Challenges
+
+Needle does well for single tool calls based on specific and direct queries, but does a bit worse when requests are chained (Roll a d20, roll a d6, then pick a number between 1 and 100 and flip 2 coins) or vague. Ideally, we could have a separate layer with an additional model specialized to [decompose tasks](https://www.amazon.science/blog/how-task-decomposition-and-smaller-llms-can-make-ai-more-affordable) and refer complicated tasks to server-side models. 
+
+There's also the issue inherent to using this model, which is that you'll need another model for actual text generation (i.e. passing on the tool results to users in plain language). But for instances where you're handling the presentation of data with UI components, this model alone is a good fit. 
 
 ## Basic Implementation
 
